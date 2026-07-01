@@ -1,6 +1,6 @@
 # FinAlly — AI Trading Workstation
 
-A visually stunning AI-powered trading workstation that streams live market data, simulates portfolio trading, and integrates an LLM chat assistant that can analyze positions and execute trades via natural language.
+An AI-powered trading workstation that streams live market data, simulates portfolio trading, and integrates an LLM chat assistant that can analyze positions and execute trades via natural language.
 
 Built entirely by coding agents as a capstone project for an agentic AI coding course.
 
@@ -15,22 +15,20 @@ Built entirely by coding agents as a capstone project for an agentic AI coding c
 
 ## Architecture
 
-Single Docker container serving everything on port 8000:
+Single Docker container on port 8000:
 
-- **Frontend**: Next.js (static export) with TypeScript and Tailwind CSS
+- **Frontend**: Next.js (static export), TypeScript, Tailwind CSS
 - **Backend**: FastAPI (Python/uv) with SSE streaming
-- **Database**: SQLite with lazy initialization
+- **Database**: SQLite with lazy initialization and seed data
 - **AI**: LiteLLM → OpenRouter (Cerebras inference) with structured outputs
 - **Market data**: Built-in GBM simulator (default) or Massive API (optional)
 
 ## Quick Start
 
 ```bash
-# Clone and configure
 cp .env.example .env
 # Add your OPENROUTER_API_KEY to .env
 
-# Run with Docker
 docker build -t finally .
 docker run -v finally-data:/app/db -p 8000:8000 --env-file .env finally
 
@@ -42,8 +40,8 @@ docker run -v finally-data:/app/db -p 8000:8000 --env-file .env finally
 | Variable | Required | Description |
 |---|---|---|
 | `OPENROUTER_API_KEY` | Yes | OpenRouter API key for AI chat |
-| `MASSIVE_API_KEY` | No | Massive (Polygon.io) key for real market data; omit to use simulator |
-| `LLM_MOCK` | No | Set `true` for deterministic mock LLM responses (testing) |
+| `MASSIVE_API_KEY` | No | Polygon.io key for real market data; omit to use simulator |
+| `LLM_MOCK` | No | `true` for deterministic mock responses (testing/CI) |
 
 ## Project Structure
 
@@ -51,10 +49,10 @@ docker run -v finally-data:/app/db -p 8000:8000 --env-file .env finally
 finally/
 ├── frontend/    # Next.js static export
 ├── backend/     # FastAPI uv project
-├── planning/    # Project documentation and agent contracts
-├── test/        # Playwright E2E tests
 ├── db/          # SQLite volume mount (runtime)
-└── scripts/     # Start/stop helpers
+├── test/        # Playwright E2E tests
+├── scripts/     # Start/stop helpers
+└── planning/    # Project documentation
 ```
 
 ## License

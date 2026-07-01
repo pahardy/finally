@@ -39,9 +39,9 @@ The user runs a single Docker command (or a provided start script). A browser op
 - **Responsive but desktop-first**: optimized for wide screens, functional on tablet
 
 ### Color Scheme
-- Accent Yellow: `#ecad0a`
-- Blue Primary: `#209dd7`
-- Purple Secondary: `#753991` (submit buttons)
+- Accent Yellow: `#ecad0a` — ticker symbols, price values, key data labels
+- Blue Primary: `#209dd7` — interactive elements, links, chart lines
+- Purple Secondary: `#753991` — submit/action buttons
 
 ## 3. Architecture Overview
 
@@ -88,7 +88,7 @@ The user runs a single Docker command (or a provided start script). A browser op
 finally/
 ├── frontend/                 # Next.js TypeScript project (static export)
 ├── backend/                  # FastAPI uv project (Python)
-│   └── db/                   # Schema definitions, seed data, migration logic
+│   └── schema/               # Schema definitions, seed data, migration logic
 ├── planning/                 # Project-wide documentation for agents
 │   ├── PLAN.md               # This document
 │   └── ...                   # Additional agent reference docs
@@ -110,7 +110,7 @@ finally/
 
 - **`frontend/`** is a self-contained Next.js project. It knows nothing about Python. It talks to the backend via `/api/*` endpoints and `/api/stream/*` SSE endpoints. Internal structure is up to the Frontend Engineer agent.
 - **`backend/`** is a self-contained uv project with its own `pyproject.toml`. It owns all server logic including database initialization, schema, seed data, API routes, SSE streaming, market data, and LLM integration. Internal structure is up to the Backend/Market Data agents.
-- **`backend/db/`** contains schema SQL definitions and seed logic. The backend lazily initializes the database on first request — creating tables and seeding default data if the SQLite file doesn't exist or is empty.
+- **`backend/schema/`** contains schema SQL definitions and seed logic. The backend lazily initializes the database on first request — creating tables and seeding default data if the SQLite file doesn't exist or is empty.
 - **`db/`** at the top level is the runtime volume mount point. The SQLite file (`db/finally.db`) is created here by the backend and persists across container restarts via Docker volume.
 - **`planning/`** contains project-wide documentation, including this plan. All agents reference files here as the shared contract.
 - **`test/`** contains Playwright E2E tests and supporting infrastructure (e.g., `docker-compose.test.yml`). Unit tests live within `frontend/` and `backend/` respectively, following each framework's conventions.
@@ -175,9 +175,10 @@ Both the simulator and the Massive client implement the same abstract interface.
 
 - Endpoint: `GET /api/stream/prices`
 - Long-lived SSE connection; client uses native `EventSource` API
-- Server pushes price updates for all tickers known to the system at a regular cadence (~500ms) — in the single-user model this is equivalent to the user's watchlist
+- Server pushes price updates for watchlist tickers only at a regular cadence (~500ms)
 - Each SSE event contains ticker, price, previous price, timestamp, and change direction
 - Client handles reconnection automatically (EventSource has built-in retry)
+- Multiple browser tabs each open their own SSE connection; all read from the same shared in-memory cache
 
 ---
 
@@ -215,6 +216,7 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 - `avg_cost` REAL
 - `updated_at` TEXT (ISO timestamp)
 - UNIQUE constraint on `(user_id, ticker)`
+- Row is deleted when quantity reaches 0 (no zero-quantity rows)
 
 **trades** — Trade history (append-only log)
 - `id` TEXT PRIMARY KEY (UUID)
@@ -256,14 +258,16 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 ### Portfolio
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/portfolio` | Current positions, cash balance, total value, unrealized P&L |
-| POST | `/api/portfolio/trade` | Execute a trade: `{ticker, quantity, side}` |
-| GET | `/api/portfolio/history` | Portfolio value snapshots over time (for P&L chart) |
+| GET | `/api/portfolio` | `{cash, total_value, positions: [{ticker, quantity, avg_cost, current_price, unrealized_pnl, pnl_pct}]}` |
+| POST | `/api/portfolio/trade` | Execute a trade: `{ticker, quantity, side}` → `{success, trade, cash_remaining}` |
+| GET | `/api/portfolio/history` | `[{recorded_at, total_value}]` — for P&L chart |
+
+Trade validation (cash check for buys, share check for sells) is shared between manual trades and LLM-initiated trades. Buying a ticker not on the watchlist auto-adds it to the watchlist.
 
 ### Watchlist
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/watchlist` | Current watchlist tickers with latest prices |
+| GET | `/api/watchlist` | `[{ticker, price, prev_price, change_pct}]` |
 | POST | `/api/watchlist` | Add a ticker: `{ticker}` |
 | DELETE | `/api/watchlist/{ticker}` | Remove a ticker |
 
@@ -290,9 +294,9 @@ There is an OPENROUTER_API_KEY in the .env file in the project root.
 When the user sends a chat message, the backend:
 
 1. Loads the user's current portfolio context (cash, positions with P&L, watchlist with live prices, total portfolio value)
-2. Loads recent conversation history from the `chat_messages` table
+2. Loads the last 20 messages from the `chat_messages` table
 3. Constructs a prompt with a system message, portfolio context, conversation history, and the user's new message
-4. Calls the LLM via LiteLLM → OpenRouter, requesting structured output, using the cerebras-inference skill
+4. Calls the LLM via LiteLLM → OpenRouter, requesting structured output
 5. Parses the complete structured JSON response
 6. Auto-executes any trades or watchlist changes specified in the response
 7. Stores the message and executed actions in `chat_messages`
@@ -309,14 +313,15 @@ The LLM is instructed to respond with JSON matching this schema:
     {"ticker": "AAPL", "side": "buy", "quantity": 10}
   ],
   "watchlist_changes": [
-    {"ticker": "PYPL", "action": "add"}
+    {"ticker": "PYPL", "action": "add"},
+    {"ticker": "NFLX", "action": "remove"}
   ]
 }
 ```
 
 - `message` (required): The conversational text shown to the user
 - `trades` (optional): Array of trades to auto-execute. Each trade goes through the same validation as manual trades (sufficient cash for buys, sufficient shares for sells)
-- `watchlist_changes` (optional): Array of watchlist modifications
+- `watchlist_changes` (optional): Array of watchlist modifications. Valid `action` values: `"add"`, `"remove"`
 
 ### Auto-Execution
 
@@ -325,7 +330,7 @@ Trades specified by the LLM execute automatically — no confirmation dialog. Th
 - It creates an impressive, fluid demo experience
 - It demonstrates agentic AI capabilities — the core theme of the course
 
-If a trade fails validation (e.g., insufficient cash), the error is included in the chat response so the LLM can inform the user.
+If a trade fails validation (e.g., insufficient cash), the error is injected into the `message` string so the LLM can inform the user. No schema extension is needed.
 
 ### System Prompt Guidance
 
@@ -352,7 +357,7 @@ When `LLM_MOCK=true`, the backend returns deterministic mock responses instead o
 
 The frontend is a single-page application with a dense, terminal-inspired layout. The specific component architecture and layout system is up to the Frontend Engineer, but the UI should include these elements:
 
-- **Watchlist panel** — grid/table of watched tickers with: ticker symbol, current price (flashing green/red on change), daily change %, and a sparkline mini-chart (accumulated from SSE since page load)
+- **Watchlist panel** — grid/table of watched tickers with: ticker symbol, current price (flashing green/red on change), change % from simulator seed price, and a sparkline mini-chart (accumulated from SSE since page load; starts empty on refresh)
 - **Main chart area** — larger chart for the currently selected ticker, with at minimum price over time. Clicking a ticker in the watchlist selects it here.
 - **Portfolio heatmap** — treemap visualization where each rectangle is a position, sized by portfolio weight, colored by P&L (green = profit, red = loss)
 - **P&L chart** — line chart showing total portfolio value over time, using data from `portfolio_snapshots`
@@ -435,9 +440,7 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 
 **Frontend (React Testing Library or similar)**:
 - Component rendering with mock data
-- Price flash animation triggers correctly on price changes
 - Watchlist CRUD operations
-- Portfolio display calculations
 - Chat message rendering and loading state
 
 ### E2E Tests (in `test/`)
@@ -454,3 +457,28 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 - Portfolio visualization: heatmap renders with correct colors, P&L chart has data points
 - AI chat (mocked): send a message, receive a response, trade execution appears inline
 - SSE resilience: disconnect and verify reconnection
+
+---
+
+## 13. Design Decisions
+
+Decisions made during plan review — applied to the sections above.
+
+| Topic | Decision |
+|---|---|
+| Sparkline on page refresh | Sparklines start empty on reload — no history endpoint |
+| SSE scope | Watchlist tickers only; removing from watchlist stops live price updates for that ticker |
+| Trade for unwatched ticker | Auto-add ticker to watchlist on trade execution |
+| Change % in simulator | Computed vs. simulator seed price; no "daily open" concept |
+| Chat history limit | Last 20 messages |
+| Sold-out positions | Delete row when quantity reaches 0 |
+| `watchlist_changes` actions | Two values only: `"add"` and `"remove"` |
+| Trade error in chat | Injected into `message` string; no schema extension |
+| Portfolio snapshot interval | Keep 30 seconds — acceptable for a demo |
+| Multiple browser tabs | Fine — all SSE connections read from the same in-memory cache |
+| LLM model ID | Agents must verify `openrouter/openai/gpt-oss-120b` is still available at implementation time |
+| `backend/db/` naming conflict | Renamed to `backend/schema/` |
+| Skill reference in spec | Removed from §9 step 4 — implementation detail belongs in backend docs |
+| Color usage | Added usage context for Yellow and Blue in §2 |
+| Trade validation | Noted in §8 that manual and LLM trades share the same validation function |
+| Frontend unit tests | Removed prescriptive animation/calculation test cases; frontend agent decides internals |
